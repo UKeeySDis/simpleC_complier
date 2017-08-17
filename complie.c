@@ -16,6 +16,7 @@ int *stack;    //栈
 int line;      //当前行数
 int *main_func;  //指向符号表中主函数的条目
 int *pc, *bp, *sp, ax; //寄存器
+int local_offset; //局部变量在栈中的偏移
 //数据类型
 enum { CHAR, INT, PTR};
 
@@ -332,6 +333,244 @@ void next()
     }
   }
 }
+//语法分析部分
+int grammar()
+{
+  //type:记录当前标识的类型
+  //enum_value:枚举变量的值
+  //para_num:参数加局部变量的个数
+  int type, enum_value, para_num;
+
+  line = 1;
+  next();
+  while(token)
+  {
+    //int型
+    if(token == Int)
+    {
+      next();
+      type = INT;
+    }
+    //char型
+    else if(token == Char)
+    {
+      next();
+      type = CHAR;
+    }
+    //enum型
+    else if(token == Enum)
+    {
+      next();
+      //去除多的空格
+      if(token != '{')
+      {
+        next();
+      }
+      //解析enum
+      if(token == '{')
+      {
+        next();
+        enum_value = 0;
+        //直到enum结束定义
+        while(token != '}')
+        {
+          //enum赋值有两种方式,一种默认从0开始,还有一种可以自己进行赋值
+          //情况1
+          if(token != Id)
+          {
+            printf("%d: bad enum identifier\n", line);
+            return -1;
+          }
+          next();
+          //情况2
+          if(token == Assign)
+          {
+            next();
+            if(token != Num)
+            {
+              printf("%d: bad enum initializer\n", line);
+              return -1;
+            }
+            enum_value = token_val;
+            next();
+          }
+          //将当前的标识加入符号表中
+          current_id[Class] = Num;
+          current_id[Type] = INT;
+          current_id[Value] = enum_value++;
+          //还未结束,跳过逗号
+          if(token == ',')
+          {
+            next();
+          }
+        }
+      }
+    }
+    //解析函数声明或变量定义
+    while(token != ';' && token != '}')
+    {
+      //指针变量
+      while(token == Mul)
+      {
+        next();
+        type = type + PTR;
+      }
+      if(token != Id)
+      {
+        printf("%d: bad variable declaration\n", line);
+        return -1;
+      }
+      //判断变量/函数是否已经存在
+      if(current_id[Class])
+      {
+        printf("%d: multiple defination\n", line);
+        return -1;
+      }
+      next();
+      current_id[Type] = type;
+      //函数声明
+      if(token == '(')
+      {
+        current_id[Class] = Fun;
+        //记录该函数的地址
+        current_id[Value] = (int)(text + 1);
+        next();
+        para_num = 0;
+        //解析参数
+        while(token != ')')
+        {
+          type = INT;
+          if(token == Int)
+          {
+            next();
+          }
+          else if(token == Char)
+          {
+            next();
+            type = CHAR;
+          }
+          while(token == Mul)
+          {
+            next();
+            type = type + PTR;
+          }
+          if(token != Id)
+          {
+            printf("%d: bad parameter declaration\n", line);
+            return -1;
+          }
+          if(current_id[Class] == Loc)
+          {
+            printf("%d: multiple defination\n", line);
+            return -1;
+          }
+          //下面一系列操作都是将实参的信息保存到Tempxxx中,将形参的信息保存到xxx中
+          current_id[TempClass] = current_id[Class];
+          current_id[Class] = Loc;
+          current_id[TempType] = current_id[Type];
+          current_id[Type] = type;
+          current_id[TempValue] = current_id[Value];
+          current_id[Value] = para_num++;
+          next();
+          //如果还未结束,继续
+          if(token == ',')
+          {
+            next();
+          }
+        }
+        next();
+        //只支持声明和定义在一起
+        if(token != '{')
+        {
+          printf("%d: bad function defination\n", line);
+          return -1;
+        }
+        local_offset = ++para_num;
+        next();
+        //接下来来到了函数体,先把变量解析了
+        //遵循c89规则,即变量放在块的开头声明
+        while(token == Int || token == Char)
+        {
+          if(token == Int)
+          {
+            type = Int;
+          }
+          else
+          {
+            type=  Char;
+          }
+          next();
+          while(token != ';')
+          {
+            while(token == Mul)
+            {
+              next();
+              type = type + PTR;
+            }
+            if(token != Id)
+            {
+              printf("%d: bad local declaration\n", line);
+              return -1;
+            }
+            if(current_id[Class] == Loc)
+            {
+              printf("%d: multiple local variable defination\n", line);
+              return -1;
+            }
+            //下面一系列操作都是将全局变量的信息保存到Tempxxx中,将局部变量的信息保存到xxx中
+            current_id[TempClass] = current_id[Class];
+            current_id[Class] = Loc;
+            current_id[TempType] = current_id[Type];
+            current_id[Type] = type;
+            current_id[TempValue] = current_id[Value];
+            current_id[Value] = ++para_num;
+            next();
+            if(token == ',')
+            {
+              next();
+            }
+          }
+          next();
+        }
+        //为局部变量的入栈申请空间
+        *++text = ENT;  
+        *++text = para_num - local_offset;
+        while(token != '}')
+        {
+          //statement();
+        }
+        //函数解析完毕,弹栈
+        *++text = LEV;
+        //恢复全局变量的信息
+        current_id = symbol_table;
+        while(current_id[Token])
+        {
+          if(current_id[Class] == Loc)
+          {
+            current_id[Class] = current_id[TempClass];
+            current_id[Type] = current_id[TempType];
+            current_id[Value] = current_id[TempValue];
+          }
+          current_id = current_id + Size;
+        }
+      }
+      //全局变量
+      else
+      {
+        current_id[Class] = Glo;
+        current_id[Value] = (int)data;
+        data = data + sizeof(int);
+      }
+      if(token == ',')
+      {
+        next();
+      }
+    }
+    next();
+  }
+}
+
+
 int main(int argc, char **argv)
 {
   int fd, pool_size, i;
