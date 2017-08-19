@@ -10,6 +10,7 @@ char *data, *old_data;    //数据段
 int *text, *old_text; //代码段
 int *symbol_table; //符号表
 int *current_id;        //当前正在词法分析的标识符
+int current_type;   //当前表达式的类型
 int token;     //当前的符号
 int token_val; //符号对应的值
 int *stack;    //栈
@@ -23,9 +24,9 @@ enum { CHAR, INT, PTR};
 //指令
 enum { LEA ,IMM ,JMP ,CALL,JZ  ,JNZ ,ENT ,ADJ ,LEV ,LI  ,LC  ,SI  ,SC  ,PUSH,
        OR ,XOR ,AND ,EQ  ,NE  ,LT  ,GT  ,LE  ,GE  ,SHL ,SHR ,ADD ,SUB ,MUL ,DIV ,MOD ,
-       OPEN, READ, CLOS, PRTF, MALC, MSET, MCMP, EXIT };
+       OPEN, READ, CLOS, PRTF, MALC, FREE, MSET, MCMP, EXIT };
 //支持的标记类别(供词法分析器next解析成对应的标记)
-enum { Num, Fun, Sys, Glo, Loc, Id, Char, Else, Enum, If, Int, Return, Sizeof,
+enum { Num = 128, Fun, Sys, Glo, Loc, Id, Char, Else, Enum, If, Int, Return, Sizeof,
        While, Assign, Cond, Lor, Lan, Or, Xor, And, Eq, Ne, Lt, Gt, Le, Ge, Shl,
        Shr, Add, Sub, Mul, Div, Mod, Inc, Dec, Brak};
 //符号表的各条目
@@ -333,23 +334,724 @@ void next()
     }
   }
 }
+
+void expression(int level)
+{
+  int temp, *addr;
+  if(!token)
+  {
+    printf("%d: unexpected eof in expression\n", line);
+    exit(-1);
+  }
+  else if(token == Num)
+  {
+    *++text = IMM;
+    *++text = token_val;
+    next();
+    current_type = INT;
+  }
+  else if(token == '"')
+  {
+    *++text = IMM;
+    *++text = token_val;
+    next();
+    while(token == '"')
+    {
+      next();
+    }
+    //在末尾追加结束符
+    data = (char *)((int)data + sizeof(int) & -sizeof(int));
+    current_type = PTR;
+  }
+  else if(token == Sizeof)
+  {
+    next();
+    if(token == '(')
+    {
+      next();
+    }
+    else
+    {
+      printf("%d: expected '('\n", line);
+      exit(-1);
+    }
+    current_type = INT;
+    if(token == Int)
+    {
+      next();
+    }
+    else if(token == Char)
+    {
+      next();
+      current_type = CHAR;
+    }
+    while(token == Mul)
+    {
+      next();
+      current_type = current_type + PTR;
+    }
+    if(token == ')')
+    {
+      next();
+    }
+    else
+    {
+      printf("%d: expected ')'\n", line);
+      exit(-1);
+    }
+    *++text = IMM;
+    if(current_type == PTR || current_type == INT)
+    {
+      *++text = sizeof(int);
+    }
+    else
+    {
+      *++text = sizeof(char);
+    }
+    current_type = INT;
+  }
+  else if(token == Id)
+  {
+    addr = current_id;
+    next();
+    if(token == '(')
+    {
+      next();
+      temp = 0;
+      while(token != ')')
+      {
+        expression(Assign);
+        *++text = PUSH;
+        ++temp;
+        if(token == ',')
+        {
+          next();
+        }
+      }
+      next();
+      if(addr[Class] == Sys)
+      {
+        *++text = addr[Value];
+      }
+      else if(addr[Class] == Fun)
+      {
+        *++text = CALL;
+        *++text = addr[Value];
+      }
+      else
+      {
+        printf("%d: bad function call\n", line);
+        exit(-1);
+      }
+      if(temp)
+      {
+        *++text = ADJ;
+        *++text = temp;
+      }
+      current_type = addr[Type];
+    }
+    else if(addr[Class] == Num)
+    {
+      *++text = IMM;
+      *++text = addr[Value];
+      current_type = INT;
+    }
+    else
+    {
+      if(addr[Class] == Loc)
+      {
+        *++text = LEA;
+        *++text = local_offset - addr[Value];
+      }
+      else if(addr[Class] == Glo)
+      {
+        *++text = IMM;
+        *++text = addr[Value];
+      }
+      else
+      {
+        printf("%d: undefined variable\n", line);
+        exit(-1);
+      }
+      current_type = addr[Type];
+      *++text = (current_type == CHAR) ? LC : LI;
+     }
+  }
+  else if(token == '(')
+  {
+    next();
+    if(token == Int || token == Char)
+    {
+      temp = (token == Int) ? Int : Char;
+      next();
+      while(token == Mul)
+      {
+        next();
+        temp = temp + PTR;
+      }
+      if(token == ')')
+      {
+        next();
+      }
+      else
+      {
+        printf("%d: bad cast\n", line);
+        exit(-1);
+      }
+      expression(Inc);
+      current_type = temp;
+    }
+    else
+    {
+      expression(Assign);
+      if(token == ')')
+      {
+        next();
+      }
+      else
+      {
+        printf("%d: expected ')'\n", line);
+        exit(-1);
+      }
+    }
+  }
+  else if(token == Mul)
+  {
+    next();
+    expression(Inc);
+    if(current_type > INT)
+    {
+      current_type = current_type - PTR;
+    }
+    else
+    {
+      printf("%d: bad dereference\n", line);
+      exit(-1);
+    }
+    *++text = (current_type == CHAR) ? LC : LI;
+  }
+  else if(token == And)
+  {
+    next();
+    expression(Inc);
+    if(*text == LC || *text == LI)
+    {
+      --text;
+    }
+    else
+    {
+      printf("%d: bad address-of\n", line);
+      exit(-1);
+    }
+    current_type = current_type + PTR;
+  }
+  else if(token == '!')
+  {
+    next();
+    expression(Inc);
+    *++text = PUSH;
+    *++text = IMM;
+    *++text = 0;
+    *++text = EQ;
+    current_type = INT;
+  }
+  else if(token == '~')
+  {
+    next();
+    expression(Inc);
+    *++text = PUSH;
+    *++text = IMM;
+    *++text = -1;
+    *++text = XOR;
+    current_type = INT;
+  }
+  else if(token == Add)
+  {
+    next();
+    expression(Inc);
+    current_type = INT;
+  }
+  else if(token == Sub)
+  {
+    next();
+    *++text = IMM;
+    if(token == Num)
+    {
+      *++text = -token_val;
+      next();
+    }
+    else
+    {
+      *++text = -1;
+      *++text = PUSH;
+      expression(Inc);
+      *++text = MUL;
+    }
+    current_type = INT;
+  }
+  else if(token == Inc || token == Dec)
+  {
+    temp = token;
+    next();
+    expression(Inc);
+    if(*text == LC)
+    {
+      *text = PUSH;
+      *++text = LC;
+    }
+    else if(*text == LI)
+    {
+      *text = PUSH;
+      *++text = LI;
+    }
+    else
+    {
+      printf("%d: bad lvalue in pre-increment\n", line);
+      exit(-1);
+    }
+    *++text = PUSH;
+    *++text = IMM;
+
+    *++text = (current_type > PTR) ? sizeof(int) : sizeof(char);
+    *++text = (temp == Inc) ? ADD : SUB;
+    *++text = (current_type == CHAR) ? SC : SI;
+  }
+  else
+  {
+    printf("%d: bad expression\n", line);
+    exit(-1);
+  }
+
+  while(token >= level)
+  {
+    temp = current_type;
+    if(token == Assign)
+    {
+      next();
+      if(*text == LC || *text == LI)
+      {
+        *text = PUSH;
+      }
+      else
+      {
+        printf("%d: bad lvalue in assignment\n", line);
+        exit(-1);
+      }
+      expression(Assign);
+      current_type = temp;
+      *++text = (current_type == CHAR) ? SC : SI;
+    }
+    else if(token == Cond)
+    {
+      next();
+      *++text = JZ;
+      addr = ++text;
+      expression(Assign);
+      if(token == ':')
+      {
+        next();
+      }
+      else
+      {
+        printf("%d: conditional missing colon\n", line);
+        exit(-1);
+      }
+      *addr = (int)(text + 3);
+      *++text = JMP;
+      addr = ++text;
+      expression(Cond);
+      *addr = (int)(text + 1);
+    }
+    else if(token == Lor)
+    {
+      next();
+      *++text = JNZ;
+      addr = ++text;
+      expression(Lan);
+      *addr = (int)(text + 1);
+      current_type = INT;
+    }
+    else if(token == Lan)
+    {
+      next();
+      *++text = JZ;
+      addr = ++text;
+      expression(Or);
+      *addr = (int)(text + 1);
+      current_type = INT;
+    }
+    else if(token == Or)
+    {
+      next();
+      *++text = PUSH;
+      expression(Xor);
+      *++text = OR;
+      current_type = INT;
+    }
+    else if(token == Xor)
+    {
+      next();
+      *++text = PUSH;
+      expression(And);
+      *++text = XOR;
+      current_type = INT;
+    }
+    else if(token == And)
+    {
+      next();
+      *++text = PUSH;
+      expression(Eq);
+      *++text = AND;
+      current_type = INT;
+    }
+    else if(token == Eq)
+    {
+      next();
+      *++text = PUSH;
+      expression(Lt);
+      *++text = EQ;
+      current_type = INT;
+    }
+    else if(token == Ne)
+    {
+      next();
+      *++text = PUSH;
+      expression(Lt);
+      *++text = NE;
+      current_type = INT;
+    }
+    else if(token == Lt)
+    {
+      next();
+      *++text = PUSH;
+      expression(Shl);
+      *++text = LT;
+      current_type = INT;
+    }
+    else if(token == Gt)
+    {
+      next();
+      *++text = PUSH;
+      expression(Shl);
+      *++text = GT;
+      current_type = INT;
+    }
+    else if(token == Le)
+    {
+      next();
+      *++text = PUSH;
+      expression(Shl);
+      *++text = LE;
+      current_type = INT;
+    }
+    else if(token == Ge)
+    {
+      next();
+      *++text = PUSH;
+      expression(Shl);
+      *++text = GE;
+      current_type = INT;
+    }
+    else if(token == Shl)
+    {
+      next();
+      *++text = PUSH;
+      expression(Add);
+      *++text = SHL;
+      current_type = INT;
+    }
+    else if(token == Shr)
+    {
+      next();
+      *++text = PUSH;
+      expression(Add);
+      *++text = SHR;
+      current_type = INT;
+    }
+    else if(token == Add)
+    {
+      next();
+      *++text = PUSH;
+      expression(Mul);
+      current_type = temp;
+      if(current_type > PTR)
+      {
+        *++text = PUSH;
+        *++text = IMM;
+        *++text = sizeof(int);
+        *++text = MUL;
+      }
+      *++text = ADD;
+    }
+    else if(token == Sub)
+    {
+      next();
+      *++text = PUSH;
+      expression(Mul);
+      if(temp > PTR && temp == current_type)
+      {
+        *++text = SUB;
+        *++text = PUSH;
+        *++text = IMM;
+        *++text = sizeof(int);
+        *++text = DIV;
+        current_type = INT;
+      }
+      else if((current_type = temp) > PTR)
+      {
+        *++text = PUSH;
+        *++text = IMM;
+        *++text = sizeof(int);
+        *++text = MUL;
+        *++text = SUB;
+      }
+      else
+      {
+        *++text = SUB;
+      }
+    }
+    else if(token == Mul)
+    {
+      next();
+      *++text = PUSH;
+      expression(Inc);
+      *++text = MUL;
+      current_type = INT;
+    }
+    else if(token == Div)
+    {
+      next();
+      *++text = PUSH;
+      expression(Inc);
+      *++text = DIV;
+      current_type = INT;
+    }
+    else if(token == Mod)
+    {
+      next();
+      *++text = PUSH;
+      expression(Inc);
+      *++text = MOD;
+      current_type = INT;
+    }
+    else if(token == Inc || token == Dec)
+    {
+      if(*text == LC)
+      {
+        *text = PUSH;
+        *++text = LC;
+      }
+      else if(*text == LI)
+      {
+        *text = PUSH;
+        *++text = LI;
+      }
+      else
+      {
+        printf("%d: bad lvalue in post-increment\n", line);
+        exit(-1);
+      }
+      *++text = PUSH;
+      *++text = IMM;
+      *++text = (current_type > PTR) ? sizeof(int) : sizeof(char);
+      *++text = (token == Inc) ? ADD : SUB;
+      *++text = (current_type == CHAR) ? SC : SI;
+      *++text = PUSH;
+      *++text = IMM;
+      *++text = (current_type > PTR) ? sizeof(int) : sizeof(char);
+      *++text = (token == Inc) ? SUB : ADD;
+      next();
+    }
+    else if(token == Brak)
+    {
+      next();
+      *++text = PUSH;
+      expression(Assign);
+      if(token == ']')
+      {
+        next();
+      }
+      else
+      {
+        printf("%d: close bracket expected\n", line);
+        exit(-1);
+      }
+      if(temp > PTR)
+      {
+        *++text = PUSH;
+        *++text = IMM;
+        *++text = sizeof(int);
+        *++text = MUL;
+      }
+      else if(temp < PTR)
+      {
+        printf("%d: pointer type expected\n", line);
+        exit(-1);
+      }
+      *++text = ADD;
+      current_type = temp - PTR;
+      *++text = (current_type == CHAR) ? LC : LI;
+    }
+    else
+    {
+      printf("%d: compiler error\n", line);
+      exit(-1);
+    }
+  }
+}
+//解析语句
+void statement()
+{
+  //*a:代表条件为false时跳转到的语句
+  //*b:为了防止顺序执行if-else代码,所以执行了true部分时应跳过false部分
+  int *a, *b;
+  //if语句
+  if(token == If)
+  {
+    next();
+    if(token == '(')
+    {
+      next();
+    }
+    else
+    {
+      printf("%d: expected '('\n", line);
+      exit(-1);
+    }
+    //解析表达式
+    expression(Assign);
+    if(token == ')')
+    {
+      next();
+    }
+    else
+    {
+      printf("%d: expected ')'\n", line);
+      exit(-1);
+    }
+    //将JZ存入text中
+    *++text = JZ;
+    b = ++text;
+
+    statement();
+    
+    if(token == Else)
+    {
+      next();
+      
+      //将JMP B指令存入text段中
+      *b = (int)(text + 3);
+      *++text = JMP;
+      b = ++text;
+
+
+      statement();
+    }
+    *b = (int)(text + 1);
+  }
+  //while语句
+  else if(token == While)
+  {
+    next();
+    a = text + 1;
+    if(token == '(')
+    {
+      next();
+    }
+    else
+    {
+      printf("%d: expected '('\n", line);
+      exit(-1);
+    }
+
+    expression(Assign);
+    
+    if(token == ')')
+    {
+      next();
+    }
+    else
+    {
+      printf("%d: expected ')'\n", line);
+      exit(-1);
+    }
+    *++text = JZ;
+    b = ++text;
+    
+    statement();
+    
+    *++text = JMP;
+    *++text = (int)a;
+    *b = (int)(text + 1);
+  }
+  //Return语句
+  else if(token == Return)
+  {
+    next();
+    if(token != ';')
+    {
+      expression(Assign);
+    }
+    //LEV指令用来销毁函数调用栈
+    *++text = LEV;
+    if(token == ';')
+    {
+      next();
+    }
+    else
+    {
+      printf("%d: expected ';'\n", line);
+      exit(-1);
+    }
+  }
+  //其他
+  else if(token == '{')
+  {
+    next();
+    while(token != '}')
+    {
+      statement();
+    }
+    next();
+  }
+  else if(token == ';')
+  {
+    next();
+  }
+  else
+  {
+    expression(Assign);
+    if(token == ';')
+    {
+      next();
+    }
+    else
+    {
+      printf("%d: expected ';'\n", line);
+      exit(-1);
+    }
+  }
+}
+
+
+
 //语法分析部分
 int grammar()
 {
   //type:记录当前标识的类型
   //enum_value:枚举变量的值
   //para_num:参数加局部变量的个数
-  int type, enum_value, para_num;
+  int base_type, type, enum_value, para_num;
 
   line = 1;
   next();
   while(token)
   {
+    base_type = INT;
     //int型
     if(token == Int)
     {
       next();
-      type = INT;
     }
     //char型
     else if(token == Char)
@@ -404,11 +1106,13 @@ int grammar()
             next();
           }
         }
+        next();
       }
     }
     //解析函数声明或变量定义
     while(token != ';' && token != '}')
     {
+      type = base_type;
       //指针变量
       while(token == Mul)
       {
@@ -502,6 +1206,7 @@ int grammar()
           next();
           while(token != ';')
           {
+            type = base_type;
             while(token == Mul)
             {
               next();
@@ -537,7 +1242,7 @@ int grammar()
         *++text = para_num - local_offset;
         while(token != '}')
         {
-          //statement();
+          statement();
         }
         //函数解析完毕,弹栈
         *++text = LEV;
@@ -570,10 +1275,189 @@ int grammar()
   }
 }
 
+int run()
+{
+  int i, *temp;
+  while(1)
+  {
+    i = *pc++;
+    if(i == LEA)
+    {
+      ax = (int)(bp + *pc++);
+    }
+    else if(i == IMM)
+    {
+      ax = *pc++;
+    }
+    else if(i == JMP)
+    {
+      pc = (int *)*pc;
+    }
+    else if(i == CALL)
+    {
+      *--sp = (int)(pc + 1);
+      pc = (int *)*pc;
+    }
+    else if(i == JZ)
+    {
+      pc = ax ? pc + 1 : (int *)*pc;
+    }
+    else if(i == JNZ)
+    {
+      pc = ax ? (int *)*pc : pc + 1;
+    }
+    else if(i == ENT)
+    {
+      *--sp = (int)bp;
+      bp = sp;
+      sp = sp - *pc++;
+    }
+    else if(i == ADJ)
+    {
+      sp = sp + *pc++;
+    }
+    else if(i == LEV)
+    {
+      sp = bp;
+      bp = (int *)*sp++;
+      pc = (int *)*sp++;
+    }
+    else if(i == LI)
+    {
+      ax = *(int *)ax;
+    }
+    else if(i == LC)
+    {
+      ax = *(char *)ax;
+    }
+    else if(i == SI)
+    {
+      *(int *)*sp++ = ax;
+    }
+    else if(i == SC)
+    {
+      ax = *(char *)*sp++ = ax;
+    }
+    else if(i == PUSH)
+    {
+      *--sp = ax;
+    }
+    else if(i == OR)
+    {
+      ax = *sp++ | ax;
+    }
+    else if(i == XOR)
+    {
+      ax = *sp++ ^ ax;
+    }
+    else if(i == AND)
+    {
+      ax = *sp++ & ax;
+    }
+    else if(i == EQ)
+    {
+      ax = *sp++ == ax;
+    }
+    else if(i == NE)
+    {
+      ax = *sp++ != ax;
+    }
+    else if(i == LT)
+    {
+      ax = *sp++ < ax;
+    }
+    else if(i == GT)
+    {
+      ax = *sp++ > ax;
+    }
+    else if(i == LE)
+    {
+      ax = *sp++ <= ax;
+    }
+    else if(i == GE)
+    {
+      ax = *sp++ >= ax;
+    }
+    else if(i == SHL)
+    {
+      ax = *sp++ << ax;
+    }
+    else if(i == SHR)
+    {
+      ax = *sp++ >> ax;
+    }
+    else if(i == ADD)
+    {
+      ax = *sp++ + ax;
+    }
+    else if(i == SUB)
+    {
+      ax = *sp++ - ax;
+    }
+    else if(i == MUL)
+    {
+      ax = *sp++ * ax;
+    }
+    else if(i == DIV)
+    {
+      ax = *sp++ / ax;
+    }
+    else if(i == MOD)
+    {
+      ax = *sp++ % ax;
+    }
+    else if(i == OPEN)
+    {
+      ax = open((char *)sp[1], *sp);
+    }
+    else if(i == READ)
+    {
+      ax = read(sp[2], (char *)sp[1], *sp);
+    }
+    else if(i == CLOS)
+    {
+      ax = close(*sp);
+    }
+    else if(i == PRTF)
+    {
+      temp = sp + pc[1];
+      ax = printf((char *)temp[-1], temp[-2], temp[-3], temp[-4], temp[-5], temp[-6]);
+    }
+    else if(i == MALC)
+    {
+      ax = (int)malloc(*sp);
+    }
+    else if(i == FREE)
+    {
+      free((void *)*sp);
+    }
+    else if(i == MSET)
+    {
+      ax = (int)memset((char *)sp[2], sp[1], *sp);
+    }
+    else if(i == MCMP)
+    {
+      ax = memcmp((char *)sp[2], (char *)sp[1], *sp);
+    }
+    else if(i == EXIT)
+    {
+      printf("exit(%d)\n", *sp);
+      return *sp;
+    }
+    else
+    {
+      printf("unknown instruction = %d\n", i);
+      return -1;
+    }
+  }
+
+}
 
 int main(int argc, char **argv)
 {
   int fd, pool_size, i;
+  int *temp;
+  int res;
   ++argv;
   //大小
   pool_size = 256 * 1024;
@@ -655,12 +1539,28 @@ int main(int argc, char **argv)
   //释放资源
   close(fd);
 
+  grammar();
+  if(!(pc = (int *)main_func[Value]))
+  {
+    printf("main() not defined\n");
+    return -1;
+  }
+
+  sp = (int *)((int)stack + pool_size);
+  *--sp = EXIT;
+  *--sp = PUSH;
+  temp = sp;
+  *--sp = argc;
+  *--sp = (int)argv;
+  *--sp = (int)temp;
+
+  res = run();
   free(old_src_pos);
   free(stack);
   free(old_data);
   free(old_text);
   free(symbol_table);
-  return 0;
+  return res;
 }
 
 
