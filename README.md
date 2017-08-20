@@ -57,6 +57,7 @@ while(token = *src_pos++)
 
 ## 部分指令及寄存器
 - 寄存器:
+
 `SP`:栈顶指针
 
 `BP`:栈底指针
@@ -66,6 +67,7 @@ while(token = *src_pos++)
 `AX`:规定用来存放一条指令执行后的结果
 
 - 指令:
+
 `LEA <offset>`:用于获取函数调用中传入的参数
 
 `IMM <num>`:将`num`存入`ax`中
